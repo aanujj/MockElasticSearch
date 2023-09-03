@@ -1,60 +1,111 @@
-package elasticsearch
+package main
 
 import (
-	"context"
+	"bufio"
+	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"time"
-
-	"github.com/olivere/elastic/v7"
+	"strings"
+	"unicode"
 )
 
-var EsClient esClientInterface = &esClient{}
+const (
+	ValidWordsFileName  = "all-words.txt"
+	FileToCheckFileName = "check-spelling.txt"
+)
 
-//we can use without interface but while mocking and changine behaviour while testing we use interface
-type esClientInterface interface {
-	setClient(client *elastic.Client)
-	Index(interface{}) (*elastic.IndexResponse, error)
-}
-
-type esClient struct {
-	client *elastic.Client
-}
-
-//instaead of providing client package to outside world we are going to work through an interface
-
-// Obtain a client for an Elasticsearch cluster of two nodes,
-// running on 10.0.1.1 and 10.0.1.2. Do not run the sniffer.
-// Set the healthcheck interval to 10s. When requests fail,
-// retry 5 times. Print error messages to os.Stderr and informational
-// messages to os.Stdout.
-
-func Init() {
-
-	client, err := elastic.NewClient(
-		elastic.SetURL("http://localhost:9200"),
-		elastic.SetSniff(false),
-		elastic.SetHealthcheckInterval(10*time.Second),
-		//elastic.SetRetrier(NewCustomRetrier()),
-		elastic.SetGzip(true),
-		elastic.SetErrorLog(log.New(os.Stderr, "ELASTIC ", log.LstdFlags)),
-		elastic.SetInfoLog(log.New(os.Stdout, "", log.LstdFlags)),
-		elastic.SetHeaders(http.Header{
-			"X-Caller-Id": []string{"..."},
-		}),
-	)
-
+func main() {
+	// Read all valid words
+	allWords, err := readWords(ValidWordsFileName)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Error reading %s: %v", ValidWordsFileName, err)
 	}
-	EsClient.setClient(client)
+
+	// Open the file to check
+	fileToCheck, err := os.Open(FileToCheckFileName)
+	if err != nil {
+		log.Fatalf("Error opening %s: %v", FileToCheckFileName, err)
+	}
+
+	// Check if the file is empty
+	fileInfo, err := fileToCheck.Stat()
+	if err != nil {
+		log.Fatalf("Error getting file information: %v", err)
+	}
+	if fileInfo.Size() == 0 {
+		log.Println("File is empty. Nothing to check.")
+		return
+	}
+
+	defer fileToCheck.Close()
+
+	checkSpelling(fileToCheck, allWords)
 }
 
-func (c *esClient) setClient(client *elastic.Client) {
-	c.client = client
+// readWords reads a list of words from a file and returns a set.
+func readWords(filename string) (map[string]bool, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	words := make(map[string]bool)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		word := strings.TrimSpace(scanner.Text())
+		words[word] = true
+	}
+	return words, scanner.Err()
 }
-func (c *esClient) Index(interface{}) (*elastic.IndexResponse, error) {
-	ctx := context.Background()
-	return c.client.Index().Do(ctx)
+
+func checkSpelling(f *os.File, allWords map[string]bool) {
+	// Create a scanner and read the file line by line.
+	scanner := bufio.NewScanner(f)
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSpace(scanner.Text())
+		wordsInLine := strings.Fields(line)
+
+		for _, word := range wordsInLine {
+			word = cleanWord(word)
+
+			_, exists := allWords[word]
+			if word != "" && !exists {
+				fmt.Printf("Line %d: Spelling error in word %s\n", lineNumber, word)
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Error reading %s: %v", FileToCheckFileName, err)
+	}
+}
+
+// cleanWord removes digits and specified special characters from the word.
+func cleanWord(word string) string {
+
+	word = strings.ToLower(word)
+	// Remove leading and trailing undesired characters
+	word = strings.Trim(word, "*.,!?\"'()[]{}:;#&+-/=$%<>@_|~")
+	// Remove leading and trailing spaces
+	word = strings.TrimSpace(word)
+
+	// Discard word with undesired characters
+	xs := []string{"\a", "\b", "\f", "\n", "\r", "\t", "\v", "\\", "\"", "-", ".", "=", "'", "`", "?", "$", "’", "“", "‘", "–"}
+	for _, v := range xs {
+		if strings.Contains(word, v) {
+			return ""
+		}
+	}
+
+	// Discard word with numeric digits
+	for _, r := range word {
+		if unicode.IsDigit(r) {
+			return ""
+		}
+	}
+
+	return word
 }
